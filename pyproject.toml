@@ -1,14 +1,22 @@
 [project]
-name = "process-template"
-version = "0.2.0"
-description = "Add your description here"
-readme = "README.md"
+name = "digitalpost"
+version = "1.0.1"
+description = "Central afsendelses- og kvitteringsproces"
 requires-python = ">=3.13"
 dependencies = [
     "automation-server-client",
+    "python-dotenv",
+    "q-digitalpost",
     "q-haderslev-vbo",
+    "q-outlook-api",
+    "q-serviceplatformen",
+    "q-sharepoint-api",
 ]
 
 [tool.uv.sources]
 automation-server-client = { git = "https://github.com/odense-rpa/automation-server-client.git", tag = "v0.3.0" }
+q-digitalpost = { git = "https://github.com/haderslev-rpa/q-digitalpost.git", branch = "main" }
 q-haderslev-vbo = { git = "https://github.com/haderslev-rpa/q-haderslev-vbo.git", branch = "main" }
+q-outlook-api = { git = "https://github.com/haderslev-rpa/q-outlook-api.git", branch = "main" }
+q-serviceplatformen = { git = "https://github.com/haderslev-rpa/q-serviceplatformen.git", branch = "main" }
+q-sharepoint-api = { git = "https://github.com/haderslev-rpa/q-sharepoint-api.git", branch = "main" }

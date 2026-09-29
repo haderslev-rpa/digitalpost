@@ -1,21 +1,24 @@
-## How to use this template
+# digitalpost
 
-The repository has been tagged as a template repository. This means you can create a new repository based on this code using the [GitHub instructions](https://docs.github.com/en/repositories/creating-and-managing-repositories/creating-a-repository-from-a-template)
+Kør normal proces med `uv run python main.py` og cleanup med `uv run python main.py --cleanup`.
+
+Processen behandler først NEW-items og derefter Beskedfordeleren hvert femte minut i 55 minutter. Kun én Automation Server-worker må have `supports = digitalpost`.
+
+## Manuel genfremsendelse
+
+Defer-monitoren gør et udløbet WAITING_FOR_RECEIPT-item NEW. Processen markerer det derefter som exception og READY_FOR_MANUAL_RESEND uden at sende. ATS-knappen Retry gør itemet NEW og bevarer state. Kun kombinationen NEW + READY_FOR_MANUAL_RESEND udløser en aktiv genfremsendelse.
+
+## Krævet adapter
+
+Læs REQUIRED_Q_HADERSLEV_VBO.txt. Kontrollér også den konkrete mailimport i mail_service.py og download_document i q-sharepoint-api.
 
 
-### Alternative method: checkout the repository and remove git bindings
-Replace `<new-folder-name>` with your desired folder name:
-```sh
-git clone https://github.com/odense-rpa/process-template.git <new-folder-name>
+## Mail ved umatchbar kvittering
 
-cd <new-folder-name>
+Mail sendes gennem `q_outlook_api.functionality.mail_api.send_mail`.
+Afsenderen hentes fra miljøvariablen `mail`. Modtageren hentes først fra
+`DIGITALPOST_UNMATCHED_MAIL`, derefter fra `runemail`, og ellers bruges
+`automatisering@haderslev.dk`.
 
-rm -rf .git
-git init
-git add .
-git commit -m "Initial commit from process-template"
-
-git remote add origin <new-repo-url>
-git push -u origin main
-```
-
+Mailteksten indeholder alle identifikatorer, AMQP-metadata og den rå XML.
+Brokerbeskeden ackes først, når `send_mail()` er gennemført uden exception.

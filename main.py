@@ -1,54 +1,144 @@
+"""Samlet cron-styret Digital Post-proces.
+
+Processen følger Haderslevs normale processkabelon uden Playwright.
+
+Normal drift:
+    1. Behandl alle NEW-items i Digital Post-køen.
+    2. Hent og behandl alle aktuelle kvitteringer fra Beskedfordeleren.
+    3. Vent det konfigurerede interval.
+    4. Gentag indtil den maksimale køretid er nået.
+
+Lokal debug:
+    Sæt DEBUG_ITEM_REFERENCE i .env og kør:
+        uv run python main.py --debug
+
+    Ved lokal debug behandles kun det valgte NEW-item. Derefter kontrolleres
+    Beskedfordeleren én gang, og processen afslutter. Dermed forsøger næste
+    cyklus ikke at hente det samme item som NEW igen.
+
+Cleanup:
+    uv run python main.py --cleanup
+"""
+
+from __future__ import annotations
+
 import asyncio
 import logging
-import sys
 import os
-from pprint import pprint  # helper (pæn print)
+import sys
+from time import monotonic
 
-# ------------------------------------------------------------
-# 🧠 PROCESS-KODE (ÉT ITEM)
-# ------------------------------------------------------------
-from behandel import behandel_page  # funktion (genbrugelig kodeblok)
-
-# ------------------------------------------------------------
-# 🧠 AUTOMATION SERVER
-# ------------------------------------------------------------
 from automation_server_client import (
     AutomationServer,
+    WorkItemStatus,
     Workqueue,
-    WorkItemError,
-    WorkItemStatus
 )
 
-from q_haderslev_vbo.automation_server.ats_update_item_data import (
-    update_item_data
+from cleanup import cleanup_sharepoint_documents
+from configuration import (
+    POLL_INTERVAL_SECONDS,
+    PROCESS_RUNTIME_MINUTES,
+)
+from receipt_worker import drain_receipt_queue
+from send_worker import process_send_queue
+
+
+# ------------------------------------------------------------
+# LOGGING (STANDARD)
+# ------------------------------------------------------------
+DEBUG = "--debug" in sys.argv
+CLEANUP_MODE = "--cleanup" in sys.argv
+
+LOG_LEVEL = (
+    logging.DEBUG
+    if DEBUG
+    else logging.INFO
 )
 
-
-from q_haderslev_vbo.automation_server.ats_is_item_in_queue import (
-    is_item_in_queue,
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format=(
+        "%(asctime)s [%(levelname)s] "
+        "%(name)s: %(message)s"
+    ),
+    stream=sys.stdout,
+    force=True,
 )
 
+for logger_name in (
+    "pika",
+    "pika.adapters",
+    "pika.connection",
+    "pika.channel",
+    "pika.adapters.blocking_connection",
+    "pika.adapters.utils.connection_workflow",
+    "pika.adapters.utils.io_services_utils",
+):
+    logging.getLogger(
+        logger_name
+    ).setLevel(
+        logging.WARNING
+    )
 
-def _vaelg_items_til_behandling(workqueue: Workqueue):
-    """
-    Vælger items til behandling.
+logging.getLogger("httpx").setLevel(
+    logging.WARNING
+)
+logging.getLogger("httpcore").setLevel(
+    logging.WARNING
+)
+logging.getLogger(
+    "automation_server_client"
+).setLevel(logging.WARNING)
+logging.getLogger("debugpy").setLevel(
+    logging.WARNING
+)
+
+logger = logging.getLogger(__name__)
+
+
+# ------------------------------------------------------------
+# DEBUG-UDVÆLGELSE
+# ------------------------------------------------------------
+def _vaelg_items_til_behandling(
+    workqueue: Workqueue,
+) -> Workqueue | list:
+    """Vælg items til behandling.
 
     Output:
-    - Hvis DEBUG_ITEM_REFERENCE i .env mangler eller er tom:
-      Returneres selve workqueue til normal behandling.
+        Hvis DEBUG_ITEM_REFERENCE mangler eller er tom:
+            Returneres selve workqueue-objektet til normal
+            behandling af køen.
 
-    - Hvis DEBUG_ITEM_REFERENCE har en værdi:
-      Returneres en liste med kun det første fundne NEW-item.
-      Itemet ændres til status "in progress".
+        Hvis DEBUG_ITEM_REFERENCE har en værdi:
+            Returneres en liste med det første fundne NEW-item
+            med den angivne reference.
+
+    Vigtigt:
+        DEBUG_ITEM_REFERENCE bruges altid, når værdien findes
+        i .env. Det kræver ikke --debug.
+
+        Funktionen ændrer ikke selv itemets status.
+        `with item:` i process_send_queue() håndterer den
+        aktive behandling og itemets lock.
     """
-
     item_reference = os.getenv(
         "DEBUG_ITEM_REFERENCE",
         "",
     ).strip()
 
     if not item_reference:
+        logger.info(
+            "DEBUG_ITEM_REFERENCE er ikke angivet. "
+            "Hele workqueuen behandles normalt."
+        )
+
         return workqueue
+
+    logger.info(
+        "DEBUG_ITEM_REFERENCE er angivet. "
+        "Søger efter NEW-item med reference=%s.",
+        item_reference,
+    )
 
     items = workqueue.get_item_by_reference(
         reference=item_reference,
@@ -57,228 +147,316 @@ def _vaelg_items_til_behandling(workqueue: Workqueue):
 
     if not items:
         raise RuntimeError(
-            f"Ingen NEW-items fundet med reference: {item_reference}"
+            "Ingen NEW-items blev fundet med reference: "
+            f"{item_reference}"
         )
 
     item = items[0]
 
-    item.update_status(
-        WorkItemStatus.IN_PROGRESS.value,
-        "Startet via lokal debugkørsel",
+    logger.info(
+        "Item valgt via DEBUG_ITEM_REFERENCE: "
+        "id=%s, reference=%s.",
+        item.id,
+        item.reference,
     )
 
     return [item]
 
 
 # ------------------------------------------------------------
-# 🌐 PLAYWRIGHT (KAN SLETTES I PROCESSER UDEN BROWSER)
-# ------------------------------------------------------------
-from q_haderslev_vbo.playwright.browser_session import BrowserSession
-
-def get_headless_flag():  #Skriv HEADLESS=false i .env for at se browseren under kørsel
-    return os.getenv("HEADLESS", "true").lower() == "true"
-
-
-# ------------------------------------------------------------
-# LOGGING (STANDARD)
-# ------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    force=True,
-)
-
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("automation_server_client").setLevel(logging.WARNING)
-logging.getLogger("debugpy").setLevel(logging.WARNING)
-
-
-# ------------------------------------------------------------
-# QUEUE-MODE (PRODUCER)
-# ------------------------------------------------------------
-async def populate_queue(workqueue: Workqueue, debug: bool):
-    logger = logging.getLogger(__name__)
-    logger.info("Populate queue mode started")
-
-    # ❗ Ingen Playwright her (standard Automation Server, men kan tilføjes)
-    raw_items = [
-        {"cpr": "1234567891", "type": "adresseopslag"},
-        {"cpr": "1111111111", "type": "fødselsdato"},
-        {"cpr": "2222222222", "type": "myndighed"},
-    ]
-
-    for raw_item in raw_items:
-        data_json = {}
-
-        update_item_data(
-            data_json,
-            box_updates=raw_item,
-            update=False
-        )
-
-
-        item_reference = data_json["box"]["cpr"]
-
-        # Kontrollér om item allerede venter eller behandles.
-        if is_item_in_queue(
-            queue_id= #INDSÆT ID på QUEUE - men skal gerne laves fra .env eller automation server ved ved ikke hvordan endnu.
-            item_reference=item_reference,
-            new=True,
-            in_progress=True,
-            completed=True,
-            new=True,
-            pending_user_action=True
-            start_datetime="2025-07-01T00:00:00Z",
-            end_datetime="2026-07-31T23:59:59.999999Z",
-            updated_at=False,
-        ):
-            print(
-                f"Springer over: Item med reference "
-                f"'{item_reference}' findes allerede i køen."
-            )
-            continue
-
-        workqueue.add_item(
-            data=data_json,
-            reference=item_reference,
-        )
-
-        print(
-            f"Item med reference '{item_reference}' "
-            "er tilføjet til køen."
-        )
-
-
-
-
-    
-
-
-# ------------------------------------------------------------
 # PROCESS-MODE (WORKER)
 # ------------------------------------------------------------
-async def process_workqueue(workqueue: Workqueue, debug: bool):
-    logger = logging.getLogger(__name__)
-    logger.info(f"Process workqueue mode started (debug={debug})")
+async def process_cycle(
+    workqueue: Workqueue,
+    *,
+    debug: bool,
+    cycle_number: int,
+) -> None:
+    """Kør én komplet Digital Post-cyklus.
 
-    # =========================================================
-    # 🌐 PLAYWRIGHT – ÉN BROWSERSESSION FOR HELE PROCESSEN
-    #
-    # ✅ KAN SLETTES i processer uden browser
-    # =========================================================
-    headless = get_headless_flag()
-    session = BrowserSession(headless=headless,debug=debug)
-    await session.start()
-    page = await session.new_page()  # Page (browser-fane)
+    Rækkefølge:
+        1. Vælg og behandl NEW-items.
+        2. Hent og behandl aktuelle kvitteringer.
+        3. Log resultatet.
 
-    try: # denne try bruges kun til PLAYWRIGHT processer
-        # Workqueue er iterable → hvert item behandles ét ad gangen
-        for item in _vaelg_items_til_behandling(workqueue): #DEBUG_ITEM_REFERENCE=xxx i .env hvis man vil hente bestemte item.
+    Output:
+        Funktionen returnerer None.
+    """
+    logger.info("=" * 70)
+    logger.info(
+        "STARTER DIGITAL POST-CYKLUS %s",
+        cycle_number,
+    )
+    logger.info(
+        "Debug-logning: %s",
+        debug,
+    )
+    logger.info("=" * 70)
 
-            with item:
-                data = item.data
+    selected_items = _vaelg_items_til_behandling(
+        workqueue
+    )
 
-                try:
-                    print("==================================== NEXT ITEM ====================================")
-                    print(f"ITEM = ID: {item.id} - Reference: {item.reference}")
+    processed_items = await process_send_queue(
+        selected_items
+    )
 
-                    # --------------------------------------------------
-                    # ▶ PROCESS-KODE
-                    # (behandel_page bruger Playwright internt)
-                    # --------------------------------------------------
-                    await behandel_page(item=item, session=session, page=page) #Fjern session og page hvis du ikke bruger Playwright i din process
+    receipts = await asyncio.to_thread(
+        drain_receipt_queue
+    )
 
-                    update_item_data(
-                        data,
-                        item=item,
-                        status="Completed",
-                        status_code="Færdig",
-                        state="Completed",
+    logger.info("=" * 70)
+    logger.info(
+        "RESULTAT FRA DIGITAL POST-CYKLUS %s",
+        cycle_number,
+    )
+    logger.info(
+        "Behandlede NEW-items: %s",
+        processed_items,
+    )
+    logger.info(
+        "Brokerbeskeder: %s",
+        receipts.messages,
+    )
+    logger.info(
+        "Matchede kvitteringer: %s",
+        receipts.matched,
+    )
+    logger.info(
+        "Umatchede kvitteringer: %s",
+        receipts.unmatched,
+    )
+    logger.info(
+        "Completed via kvittering: %s",
+        receipts.completed,
+    )
+    logger.info(
+        "Failed via kvittering: %s",
+        receipts.failed,
+    )
+    logger.info(
+        (
+            "Kvitteringer behandlet som fortsat "
+            "pending i denne cyklus: %s"
+        ),
+        receipts.pending,
+    )
+    logger.info("=" * 70)
 
-                    )
 
-                    item.update(data)
-                    item.complete("Completed")
+async def process_workqueue(
+    workqueue: Workqueue,
+    debug: bool,
+) -> None:
+    """Kør Digital Post-processen.
 
-                except WorkItemError as e:
-                    # =================================================
-                    # ✅ SOFT ERROR
-                    # - Item fejler
-                    # =================================================
-                    logger.error(f"WorkItemError for item {item.reference}: {e}")
-                    item.fail(str(e))
-                    
-                    # Playwright:
-                    # Luk browser for sikkerhed (ny session på næste item)
-                    headless = get_headless_flag()
-                    session = BrowserSession(headless=headless,debug=debug)
-                    await session.start()
+    Normal drift:
+        Hvis DEBUG_ITEM_REFERENCE mangler, behandles køen
+        med det konfigurerede interval, indtil den maksimale
+        køretid er nået.
 
-                except Exception as e:
-                    # =================================================
-                    # ❌ HARD ERROR
-                    # - Screenshot tages
-                    # - Browser lukkes
-                    # - Processen STOPPER
-                    # =================================================
-                    logger.exception("Uventet fejl")
+    Bestemt item:
+        Hvis DEBUG_ITEM_REFERENCE er angivet, behandles kun
+        det valgte item. Beskedfordeleren kontrolleres bagefter,
+        og processen afslutter efter den første cyklus.
 
-                    try: #Playwright:
-                        if session.context and session.context.pages:
-                            page = session.context.pages[-1]
-                            await session.screenshot(
-                                page,
-                                f"hard_exception_{type(e).__name__}",
-                                always=True
-                            )
-                    except Exception:
-                        logger.warning("Kunne ikke tage screenshot ved hard error")
+    Output:
+        Funktionen returnerer None ved normal afslutning.
+    """
+    item_reference = os.getenv(
+        "DEBUG_ITEM_REFERENCE",
+        "",
+    ).strip()
 
-                    # Luk ALT (Playwright)
-                    await session.close()
+    single_item_mode = bool(
+        item_reference
+    )
 
-                    # Stop hele processen (Automation Server genstarter)
-                    raise
+    logger.info("=" * 70)
+    logger.info(
+        "STARTER DIGITAL POST-PROCES"
+    )
+    logger.info(
+        "Debug-logning: %s",
+        debug,
+    )
+    logger.info(
+        "DEBUG_ITEM_REFERENCE: %s",
+        (
+            item_reference
+            if single_item_mode
+            else "Ikke angivet"
+        ),
+    )
+    logger.info(
+        "Maksimal køretid: %s minutter",
+        PROCESS_RUNTIME_MINUTES,
+    )
+    logger.info(
+        "Kontrolinterval: %s sekunder",
+        POLL_INTERVAL_SECONDS,
+    )
+    logger.info("=" * 70)
 
-    finally: # PLAYWRIGHT:
-        # =====================================================
-        # 🧹 SIKKER OPRYDNING
-        #
-        # ✅ Lukker browser hvis processen afsluttes normalt
-        # =====================================================
-        await session.close() # denne try bruges kun til PLAYWRIGHT processer og kan slettes
+    started_at = monotonic()
+    runtime_seconds = (
+        PROCESS_RUNTIME_MINUTES * 60
+    )
+    cycle_number = 0
+
+    while (
+        monotonic() - started_at
+        < runtime_seconds
+    ):
+        cycle_number += 1
+
+        await process_cycle(
+            workqueue,
+            debug=debug,
+            cycle_number=cycle_number,
+        )
+
+        # Når en bestemt reference er angivet, skal processen
+        # ikke forsøge at finde samme item som NEW igen.
+        if single_item_mode:
+            logger.info(
+                "DEBUG_ITEM_REFERENCE er angivet. "
+                "Processen afsluttes efter én komplet cyklus."
+            )
+            break
+
+        elapsed_seconds = (
+            monotonic() - started_at
+        )
+        remaining_seconds = (
+            runtime_seconds
+            - elapsed_seconds
+        )
+
+        if remaining_seconds <= 0:
+            break
+
+        sleep_seconds = min(
+            POLL_INTERVAL_SECONDS,
+            remaining_seconds,
+        )
+
+        logger.info(
+            "Venter %.0f sekunder før næste cyklus.",
+            sleep_seconds,
+        )
+
+        await asyncio.sleep(
+            sleep_seconds
+        )
+
+    logger.info("=" * 70)
+    logger.info(
+        "DIGITAL POST-PROCESSEN ER AFSLUTTET"
+    )
+    logger.info(
+        "Gennemførte cyklusser: %s",
+        cycle_number,
+    )
+    logger.info("=" * 70)
+
+
+
+# ------------------------------------------------------------
+# CLEANUP-MODE
+# ------------------------------------------------------------
+async def run_cleanup() -> None:
+    """Kør SharePoint-cleanup uden at ændre ATS-items.
+
+    Output:
+        Funktionen returnerer None. Antal undersøgte items,
+        slettede filer og fejl skrives til loggen.
+    """
+    logger.info("=" * 70)
+    logger.info(
+        "STARTER DIGITAL POST-CLEANUP"
+    )
+    logger.info("=" * 70)
+
+    result = (
+        await cleanup_sharepoint_documents()
+    )
+
+    logger.info("=" * 70)
+    logger.info(
+        "RESULTAT FRA DIGITAL POST-CLEANUP"
+    )
+    logger.info(
+        "Undersøgte items: %s",
+        result["items"],
+    )
+    logger.info(
+        "Slettede SharePoint-filer: %s",
+        result["deleted"],
+    )
+    logger.info(
+        "Fejl: %s",
+        result["errors"],
+    )
+    logger.info("=" * 70)
+
+    if result["errors"] > 0:
+        raise RuntimeError(
+            "Digital Post-cleanup havde "
+            f"{result['errors']} fejl."
+        )
 
 
 # ------------------------------------------------------------
 # MAIN ENTRY POINT
 # ------------------------------------------------------------
+def main() -> None:
+    """Start cleanup eller den samlede Digital Post-proces.
+
+    Output:
+        Funktionen returnerer None ved normal afslutning.
+
+    Procesvalg:
+        --cleanup:
+            Kører kun SharePoint-cleanup og afslutter.
+
+        Uden --cleanup:
+            Kører afsendelsesflowet og kvitteringsflowet.
+    """
+    try:
+        if CLEANUP_MODE:
+            asyncio.run(
+                run_cleanup()
+            )
+            return
+
+        automation_server = (
+            AutomationServer.from_environment()
+        )
+        workqueue = (
+            automation_server.workqueue()
+        )
+
+        if workqueue is None:
+            raise RuntimeError(
+                "Automation Server returnerede "
+                "ingen workqueue. Kontrollér proces- "
+                "og worker-konfigurationen i ATS."
+            )
+
+        asyncio.run(
+            process_workqueue(
+                workqueue,
+                debug=DEBUG,
+            )
+        )
+
+    except Exception:
+        logger.exception(
+            "Digital Post-processen fejlede."
+        )
+        raise
+
+
 if __name__ == "__main__":
-
-    # ✅ CLI flags (runtime-parametre)
-    DEBUG = "--debug" in sys.argv   # bool (sand/falsk)
-    QUEUE_MODE = "--queue" in sys.argv
-
-    ats = AutomationServer.from_environment()
-    workqueue = ats.workqueue()
-
-    # --------------------------------------------------------
-    # QUEUE-MODE
-    # --------------------------------------------------------
-    if QUEUE_MODE:
-        # ---------------------------------------------------------------
-        # VIGTIGT:
-        # Denne linje CLEARSER alle NEW items i køen.
-        #
-        # ❗ Hvis du ALDRIG vil slette eksisterende NEW items:
-        #     → så SKAL denne linje fjernes eller kommenteres ud.
-        #
-        # workqueue.clear_workqueue(WorkItemStatus.NEW)
-        
-        workqueue.clear_workqueue(WorkItemStatus.NEW)
-        asyncio.run(populate_queue(workqueue, debug=DEBUG))
-        sys.exit(0)
-
-    # --------------------------------------------------------
-    # PROCESS-MODE
-    # --------------------------------------------------------
-    asyncio.run(process_workqueue(workqueue, debug=DEBUG))
+    main()
