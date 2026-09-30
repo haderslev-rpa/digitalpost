@@ -61,11 +61,11 @@ TEST_SOURCE_ITEM_ID = "robot-test-pdf-001"
 TEST_DELIVERY_METHOD = DeliveryMethod.DIGITAL_OR_PHYSICAL_POST
 
 TEST_ADDRESS = DigitalPostAddress(
-    name="Test Testesen",
-    street_name="Testvej",
-    house_number="3",
-    postal_code="6100",
-    city="Haderslev",
+    name="Rune Hedegaard",
+    street_name="Farrisvej",
+    house_number="31",
+    postal_code="6580",
+    city="Ødis Bramdrup",
     floor="",
     door="",
     co_name="",

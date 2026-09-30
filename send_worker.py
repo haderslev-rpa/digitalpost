@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
@@ -256,34 +257,98 @@ async def _choose_delivery_channel(
     """Vælg den konkrete leveringskanal.
 
     Output:
-        DIGITAL_POST:
-            Ved ONLY_DIGITAL_POST eller når modtageren er registreret.
-
-        PHYSICAL_POST:
-            Ved DIGITAL_OR_PHYSICAL_POST, når modtageren ikke er
+        "DIGITAL_POST":
+            Ved ONLY_DIGITAL_POST eller når modtageren er
             registreret til Digital Post.
 
-    Vigtigt:
-        Tekniske fejl fra registreringsopslaget fortsætter som exceptions.
-        En teknisk fejl bliver aldrig tolket som manglende registrering.
+        "PHYSICAL_POST":
+            Når modtageren ikke er registreret til Digital Post.
+
+            Kan desuden vælges eksplicit til den manuelle
+            integrationstest, når:
+
+                TEST_FORCE_PHYSICAL_POST=true
+
+            og:
+
+                source_process =
+                digitalpost-manuel-integrationstest
+
+    Sikkerhed:
+        Test-override kan ikke anvendes på almindelige
+        produktionsitems.
     """
-    delivery_method = box["delivery_method"]
+    test_force_physical = os.getenv(
+        "TEST_FORCE_PHYSICAL_POST",
+        "false",
+    ).strip().casefold() in {
+        "true",
+        "1",
+        "yes",
+        "ja",
+        "on",
+    }
+
+    is_manual_integration_test = (
+        box.get(
+            "source_process"
+        )
+        == "digitalpost-manuel-integrationstest"
+    )
+
+    if (
+        test_force_physical
+        and is_manual_integration_test
+    ):
+        if not isinstance(
+            box.get(
+                "address"
+            ),
+            dict,
+        ):
+            raise PermanentItemError(
+                "Fysisk integrationstest kræver en adresse."
+            )
+
+        logger.warning(
+            (
+                "Test-override er aktiveret. "
+                "Forsendelsen tvinges til fysisk post. "
+                "forsendelses_id=%s"
+            ),
+            box.get(
+                "forsendelses_id"
+            ),
+        )
+
+        return "PHYSICAL_POST"
+
+    delivery_method = box[
+        "delivery_method"
+    ]
 
     if delivery_method == "ONLY_DIGITAL_POST":
-        # q-digitalpost har allerede foretaget registreringsopslaget,
-        # inden itemet blev oprettet. Workeren må kun sende digitalt.
         return "DIGITAL_POST"
 
-    recipient = box["recipient"]
+    recipient = box[
+        "recipient"
+    ]
 
     is_registered = await asyncio.to_thread(
         check_registration,
-        recipient_id=recipient["id"],
-        recipient_id_type=recipient["id_type"],
+        recipient_id=recipient[
+            "id"
+        ],
+        recipient_id_type=recipient[
+            "id_type"
+        ],
         service="digitalpost",
     )
 
-    if not isinstance(is_registered, bool):
+    if not isinstance(
+        is_registered,
+        bool,
+    ):
         raise TypeError(
             "q-serviceplatformens check_registration() "
             "returnerede ikke True eller False."
