@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 from automation_server_client import WorkItemStatus
@@ -10,7 +9,12 @@ from q_outlook_api.functionality.mail_api import send_mail
 from q_serviceplatformen.message_broker import MessageBroker
 
 from ats_repository import find_matching_work_item
-from configuration import MAIL_RECIPIENT, MAIL_SENDER, validate_mail_configuration
+from configuration import (
+    MAIL_RECIPIENT,
+    MAIL_SENDER,
+    SEND_UNMATCHED_RECEIPT_MAIL,
+    validate_mail_configuration,
+)
 from danish_time import DanishTime
 from models import PollResult, ProcessingState
 
@@ -31,45 +35,101 @@ def send_unmatched_receipt_mail(
     raw_xml: bytes,
     metadata: dict[str, Any],
 ) -> None:
-    """Log en umatchet kvittering og send kun mail, når funktionen er aktiveret."""
+    """Log en umatchet kvittering og send eventuelt en mail.
+
+    Input:
+        receipt:
+            Den fortolkede kvittering fra q-serviceplatformen.
+
+        raw_xml:
+            Den oprindelige XML-besked som bytes.
+
+            Parameteren bevares, fordi funktionen kaldes med XML-data
+            fra Dueslaget. XML-filen vedhæftes ikke mailen.
+
+        metadata:
+            Brokerens metadata, herunder routing key.
+
+    Output:
+        Funktionen returnerer None.
+
+        Kvitteringen logges altid.
+
+        Der sendes kun mail, når:
+
+            SEND_UNMATCHED_RECEIPT_MAIL = True
+
+        i configuration.py.
+    """
     logger.warning(
         "Umatchet kvittering: status=%r, MessageUUID=%r, "
         "transaction_id=%r, broker_message_id=%r",
         getattr(receipt, "status", None),
-        getattr(receipt, "memo_message_uuid", None),
-        getattr(receipt, "serviceplatform_transaction_id", None),
-        getattr(receipt, "broker_message_id", None),
+        getattr(
+            receipt,
+            "memo_message_uuid",
+            None,
+        ),
+        getattr(
+            receipt,
+            "serviceplatform_transaction_id",
+            None,
+        ),
+        getattr(
+            receipt,
+            "broker_message_id",
+            None,
+        ),
     )
 
-    mail_enabled = os.getenv(
-        "SEND_UNMATCHED_RECEIPT_MAIL", "false"
-    ).strip().casefold() in {"true", "1", "yes", "ja", "on"}
-
-    if not mail_enabled:
+    if not SEND_UNMATCHED_RECEIPT_MAIL:
+        logger.info(
+            "Mail om umatchet kvittering er slået fra "
+            "i configuration.py."
+        )
         return
 
     validate_mail_configuration()
+
     mail_body = (
-        "En kvittering fra KOMBIT Beskedfordeleren kunne ikke matches "
-        "med et ATS-item.\n\n"
-        f"Status: {_format_mail_value(receipt.status)}\n"
-        f"MessageUUID: {_format_mail_value(receipt.memo_message_uuid)}\n"
+        "En kvittering fra KOMBIT Beskedfordeleren kunne ikke "
+        "matches med et ATS-item.\n\n"
+        f"Status: "
+        f"{_format_mail_value(getattr(receipt, 'status', None))}\n"
+        f"MessageUUID: "
+        f"{_format_mail_value(getattr(receipt, 'memo_message_uuid', None))}\n"
         "Transaction ID: "
-        f"{_format_mail_value(receipt.serviceplatform_transaction_id)}\n"
-        f"Broker message ID: {_format_mail_value(receipt.broker_message_id)}\n"
-        f"Routing key: {_format_mail_value(metadata.get('routing_key'))}\n"
+        f"{_format_mail_value(getattr(receipt, 'serviceplatform_transaction_id', None))}\n"
+        "Broker message ID: "
+        f"{_format_mail_value(getattr(receipt, 'broker_message_id', None))}\n"
+        "Routing key: "
+        f"{_format_mail_value(metadata.get('routing_key'))}\n"
     )
+
     mail = {
         "message": {
-            "subject": "Digital Post: Umatchet kvittering",
-            "body": {"contentType": "Text", "content": mail_body},
+            "subject": (
+                "Digital Post: Umatchet kvittering"
+            ),
+            "body": {
+                "contentType": "Text",
+                "content": mail_body,
+            },
             "toRecipients": [
-                {"emailAddress": {"address": MAIL_RECIPIENT}}
+                {
+                    "emailAddress": {
+                        "address": MAIL_RECIPIENT,
+                    }
+                }
             ],
         },
         "saveToSentItems": True,
     }
-    send_mail(MAIL_SENDER, mail)
+
+    send_mail(
+        MAIL_SENDER,
+        mail,
+    )
 
 
 def _submission_matches_receipt(
