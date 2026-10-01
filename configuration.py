@@ -29,7 +29,7 @@ POLL_INTERVAL_SECONDS = 5 * 60
 #     Den umatchede kvittering logges, men der sendes ingen mail.
 #
 # Kvitteringen bliver fortsat behandlet og fjernet fra Dueslaget.
-SEND_UNMATCHED_RECEIPT_MAIL = False
+SEND_UNMATCHED_RECEIPT_MAIL = True
 
 
 # Faste mailadresser.
