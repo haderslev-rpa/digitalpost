@@ -8,6 +8,17 @@ DIGITAL_POST_QUEUE_ID = 13
 # Hvor mange dage processen venter på en endelig kvittering.
 RECEIPT_DEADLINE_DAYS = 3
 
+# True:
+#     Fysisk post sættes til PENDING_USER_ACTION og afventer
+#     en endelig kvittering fra Serviceplatformen.
+#
+# False:
+#     Fysisk post completes straks, når Serviceplatformen har
+#     accepteret afsendelsen og returneret de nødvendige ID'er.
+#
+# Digital Post afventer altid kvittering uanset denne indstilling.
+WAIT_FOR_PHYSICAL_POST_RECEIPTS = False
+
 
 # Hvor længe processen kører ved hver planlagte start.
 PROCESS_RUNTIME_MINUTES = 55

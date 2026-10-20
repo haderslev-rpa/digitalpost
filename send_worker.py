@@ -44,7 +44,10 @@ from q_serviceplatformen.functionality.send_physical_post import (
 )
 
 
-from configuration import RECEIPT_DEADLINE_DAYS
+from configuration import (
+    RECEIPT_DEADLINE_DAYS,
+    WAIT_FOR_PHYSICAL_POST_RECEIPTS,
+)
 from models import ProcessingState
 from sharepoint_service import download_pdf
 
@@ -583,35 +586,30 @@ def _register_submission(
     submission_type: SubmissionType,
     delivery_channel: DeliveryChannel,
 ) -> None:
-    """Registrér en accepteret afsendelse i dansk lokal tid.
+    """Registrér en accepteret afsendelse.
+
+    Digital Post:
+        Itemet sættes til WAITING_FOR_RECEIPT og deferres,
+        indtil en endelig kvittering modtages eller fristen udløber.
+
+    Fysisk post med WAIT_FOR_PHYSICAL_POST_RECEIPTS=True:
+        Itemet behandles på samme måde og afventer kvittering.
+
+    Fysisk post med WAIT_FOR_PHYSICAL_POST_RECEIPTS=False:
+        Afsendelsen og dens ID'er gemmes, men itemet completes straks.
+        Completion betyder, at Serviceplatformen har accepteret
+        bestillingen. Det dokumenterer ikke fysisk levering.
 
     Output:
-        Funktionen returnerer None.
+        Funktionen returnerer None efter at have sat itemet til enten:
 
-        Itemet opdateres med:
-
-        - afsendelsen i submissions
-        - antal samlede afsendelser
-        - antal manuelle genforsendelser
-        - dansk afsendelsestidspunkt
-        - dansk kvitteringsfrist
-        - kort ventestatus
-
-    Alle tidspunkter gemmes i Europe/Copenhagen.
+        - PENDING_USER_ACTION, når der skal afventes kvittering.
+        - COMPLETED, når fysisk post ikke skal afvente kvittering.
     """
-    box = _box(
-        item
-    )
+    box = _box(item)
 
     submitted_at = DanishTime.convert(
         result.submitted_at
-    )
-
-    receipt_deadline = (
-        submitted_at
-        + timedelta(
-            days=RECEIPT_DEADLINE_DAYS
-        )
     )
 
     transaction_id = getattr(
@@ -619,13 +617,11 @@ def _register_submission(
         "serviceplatform_transaction_id",
         None,
     )
-
     memo_message_uuid = getattr(
         result,
         "memo_message_uuid",
         None,
     )
-
     physical_shipment_id = getattr(
         result,
         "shipment_id",
@@ -656,6 +652,20 @@ def _register_submission(
             "via fysisk post."
         )
 
+    wait_for_receipt = (
+        delivery_channel == "DIGITAL_POST"
+        or WAIT_FOR_PHYSICAL_POST_RECEIPTS
+    )
+
+    receipt_deadline = None
+    if wait_for_receipt:
+        receipt_deadline = (
+            submitted_at
+            + timedelta(
+                days=RECEIPT_DEADLINE_DAYS
+            )
+        )
+
     submissions = box.setdefault(
         "submissions",
         [],
@@ -669,33 +679,28 @@ def _register_submission(
             "box['submissions'] skal være en liste."
         )
 
-    submission_number = (
-        len(submissions)
-        + 1
-    )
+    submission_number = len(submissions) + 1
 
     submission = {
-        "submission_number": (
-            submission_number
-        ),
-        "submission_type": (
-            submission_type
-        ),
-        "delivery_channel": (
-            delivery_channel
-        ),
+        "submission_number": submission_number,
+        "submission_type": submission_type,
+        "delivery_channel": delivery_channel,
         "submitted_at": DanishTime.iso(
             submitted_at
         ),
         "serviceplatform_transaction_id": (
             transaction_id
         ),
-        "receipt_deadline_at": DanishTime.iso(
-            receipt_deadline
-        ),
         "final_result": None,
         "final_result_at": None,
     }
+
+    if receipt_deadline is not None:
+        submission["receipt_deadline_at"] = (
+            DanishTime.iso(
+                receipt_deadline
+            )
+        )
 
     if memo_message_uuid is not None:
         submission["memo_message_uuid"] = (
@@ -705,6 +710,21 @@ def _register_submission(
     if physical_shipment_id is not None:
         submission["physical_shipment_id"] = (
             physical_shipment_id
+        )
+
+    # Når fysisk post ikke afventer kvittering, dokumenterer
+    # resultatet kun, at bestillingen blev accepteret.
+    if (
+        delivery_channel == "PHYSICAL_POST"
+        and not WAIT_FOR_PHYSICAL_POST_RECEIPTS
+    ):
+        submission["final_result"] = (
+            "ACCEPTED_WITHOUT_RECEIPT"
+        )
+        submission["final_result_at"] = (
+            DanishTime.iso(
+                submitted_at
+            )
         )
 
     submissions.append(
@@ -721,17 +741,15 @@ def _register_submission(
             )
             and existing_submission.get(
                 "submission_type"
-            ) == "MANUAL_RESEND"
+            )
+            == "MANUAL_RESEND"
         )
     )
 
     box.update(
         {
-            "processing_state": (
-                ProcessingState.WAITING_FOR_RECEIPT
-            ),
-            "submission_count": (
-                len(submissions)
+            "submission_count": len(
+                submissions
             ),
             "manual_resend_count": (
                 manual_resend_count
@@ -746,11 +764,12 @@ def _register_submission(
             "requested_delivery_channel": (
                 delivery_channel
             ),
+            "last_error": None,
         }
     )
 
-    # Afsendelses-ID'erne findes i submissions.
-    # Fjern derfor dubletter fra box-topniveauet.
+    # Afsendelses-ID'erne ligger nu i submissions-listen.
+    # Fjern derfor gamle dubletter fra box-topniveauet.
     for field_name in (
         "submitted_at",
         "digital_post_id",
@@ -766,11 +785,9 @@ def _register_submission(
             None,
         )
 
-    # Tomme kvitteringsfelter oprettes først,
-    # når der modtages en kvittering.
+    # Tomme kvitteringsfelter oprettes først, når der
+    # faktisk modtages en kvittering.
     for field_name in (
-        "last_error",
-        "completed_at",
         "receipt_status",
         "actual_delivery",
         "receipt_error_code",
@@ -778,18 +795,13 @@ def _register_submission(
         "receipt_status_code",
         "receipt_status_message",
         "broker_message_id",
+        "receipt_timeout_at",
     ):
-        if box.get(
-            field_name
-        ) is None:
+        if box.get(field_name) is None:
             box.pop(
                 field_name,
                 None,
             )
-
-    item.data["defer"] = DanishTime.iso(
-        receipt_deadline
-    )
 
     state_entries = item.data.setdefault(
         "state",
@@ -815,11 +827,6 @@ def _register_submission(
             f"{submitted_at_text} "
             f"via {delivery_channel}"
         )
-
-        status_message = (
-            "Afventer endelig kvittering fra SP "
-            "efter manuel genforsendelse"
-        )
     else:
         state_message = (
             "Første afsendelse accepteret "
@@ -827,28 +834,93 @@ def _register_submission(
             f"via {delivery_channel}"
         )
 
-        status_message = (
-            "Afventer endelig kvittering fra SP"
-        )
-
     state_entries.append(
         state_message
     )
 
-    item.data["status"] = {
-        "status": "Pending User Action",
-        "status_code": (
-            status_message
-        ),
-    }
+    if wait_for_receipt:
+        box["processing_state"] = (
+            ProcessingState.WAITING_FOR_RECEIPT
+        )
 
-    _save_item(
-        item
+        item.data["defer"] = DanishTime.iso(
+            receipt_deadline
+        )
+
+        if submission_type == "MANUAL_RESEND":
+            status_message = (
+                "Afventer endelig kvittering fra SP "
+                "efter manuel genforsendelse"
+            )
+        else:
+            status_message = (
+                "Afventer endelig kvittering fra SP"
+            )
+
+        item.data["status"] = {
+            "status": "Pending User Action",
+            "status_code": status_message,
+        }
+
+        _save_item(item)
+
+        defer_item(
+            item,
+            status_message,
+        )
+        return
+
+    # Denne gren anvendes kun til fysisk post, når
+    # kvitteringsventning er slået fra.
+    completed_at = DanishTime.now().isoformat()
+
+    box.update(
+        {
+            "processing_state": (
+                ProcessingState.DELIVERED
+            ),
+            "completed_at": completed_at,
+            "physical_receipt_waiting_enabled": False,
+            "completion_reason": (
+                "PHYSICAL_POST_ACCEPTED_WITHOUT_RECEIPT"
+            ),
+        }
     )
 
-    defer_item(
-        item,
-        status_message,
+    item.data["defer"] = None
+
+    completion_message = (
+        "Fysisk post er accepteret af Serviceplatformen. "
+        "Itemet er afsluttet uden at afvente kvittering, "
+        "fordi fysisk kvitteringsbehandling er slået fra "
+        "i configuration.py."
+    )
+
+    item.data["status"] = {
+        "status": "Completed",
+        "status_code": completion_message,
+    }
+
+    state_entries.append(
+        "Fysisk post afsluttet uden kvitteringsventning "
+        f"{completed_at}"
+    )
+
+    _save_item(item)
+
+    logger.info(
+        (
+            "Fysisk post blev completed uden "
+            "kvitteringsventning. reference=%s, "
+            "transaction_id=%s, shipment_id=%s"
+        ),
+        item.reference,
+        transaction_id,
+        physical_shipment_id,
+    )
+
+    item.complete(
+        completion_message
     )
 
 
