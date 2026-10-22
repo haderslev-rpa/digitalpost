@@ -66,7 +66,7 @@ SHAREPOINT_LIBRARY_NAME = "Digitalpost"
 
 # Dokumenter må kun slettes, når det tilhørende ATS-item
 # er completed, og dokumenterne er ældre end denne grænse.
-CLEANUP_AGE_DAYS = 1
+CLEANUP_AGE_DAYS = 20
 
 
 def validate_mail_configuration() -> None:
