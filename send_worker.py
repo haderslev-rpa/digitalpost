@@ -389,18 +389,7 @@ async def _submit_physical_post(
     main_document: PostDocument,
     attachments: list[PostDocument],
 ) -> Any:
-    """Send fysisk post og returnér PhysicalPostSendResult.
-
-    Fejl:
-        PermanentItemError, hvis bestillingen har bilag. Den nuværende
-        offentlige send_physical_post()-funktion understøtter ét dokument.
-    """
-    if attachments:
-        raise PermanentItemError(
-            "Fysisk post understøtter foreløbigt ikke bilag. "
-            "Itemet har bilag og er derfor ikke sendt."
-        )
-
+    """Send fysisk post med hoveddokument og PDF-bilag."""
     address = box["address"]
 
     required_address_fields = (
@@ -431,6 +420,7 @@ async def _submit_physical_post(
         post_code=address["postal_code"],
         city=address["city"],
         document=main_document,
+        attachments=attachments,
         floor=address.get("floor") or None,
         door=address.get("door") or None,
         country_code=(
