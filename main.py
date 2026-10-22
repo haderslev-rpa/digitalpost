@@ -366,11 +366,13 @@ async def process_workqueue(
 # CLEANUP-MODE
 # ------------------------------------------------------------
 async def run_cleanup() -> None:
-    """Kør SharePoint-cleanup uden at ændre ATS-items.
+    """Kør SharePoint-cleanup og gem resultatet på ATS-items.
 
     Output:
-        Funktionen returnerer None. Antal undersøgte items,
-        slettede filer og fejl skrives til loggen.
+        Funktionen returnerer None.
+
+        Antal undersøgte items, færdigbehandlede items,
+        behandlede dokumenter og fejl skrives til loggen.
     """
     logger.info("=" * 70)
     logger.info(
@@ -391,8 +393,12 @@ async def run_cleanup() -> None:
         result["items"],
     )
     logger.info(
-        "Slettede SharePoint-filer: %s",
-        result["deleted"],
+        "Items markeret som ryddet op: %s",
+        result["completed_items"],
+    )
+    logger.info(
+        "Behandlede SharePoint-dokumenter: %s",
+        result["processed_documents"],
     )
     logger.info(
         "Fejl: %s",

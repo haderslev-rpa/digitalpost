@@ -164,16 +164,17 @@ def get_cleanup_candidates(
 
     Output:
         En liste med WorkItem-objekter, som:
-
         - tilhører Digital Post-køen
         - har ATS-status COMPLETED
         - er oprettet før aldersgrænsen
         - har processing_state DELIVERED
+        - endnu ikke er markeret som SharePoint-cleaned
 
         Listen er tom, hvis ingen items matcher.
 
     Vigtigt:
-        Funktionen ændrer ingen ATS-items og sletter ingen filer.
+        Funktionen udfører kun læsning.
+        Den ændrer ingen ATS-items og sletter ingen filer.
     """
     validated_days = _validate_positive_int(
         days,
@@ -200,6 +201,7 @@ def get_cleanup_candidates(
 
     for database_row in result["items"]:
         data = database_row.get("data") or {}
+
         box = (
             data.get("box", {})
             if isinstance(data, dict)
@@ -212,7 +214,13 @@ def get_cleanup_candidates(
         if box.get("processing_state") != "DELIVERED":
             continue
 
-        candidate_rows.append(database_row)
+        # Et item, som tidligere er ryddet op, må ikke vælges igen.
+        if box.get("documents_cleaned_up_at"):
+            continue
+
+        candidate_rows.append(
+            database_row
+        )
 
         if len(candidate_rows) >= validated_limit:
             break
