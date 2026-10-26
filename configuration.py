@@ -15,6 +15,8 @@ RECEIPT_DEADLINE_DAYS = 3
 # False:
 #     Fysisk post completes straks, når Serviceplatformen har
 #     accepteret afsendelsen og returneret de nødvendige ID'er.
+#     Vi har valgt aldrig at slå dette til, fordi vi aldrig får nogen kvitteringer. Hvis vi har brug for en kvittering,
+#     så skal vi kontakte Jan fra IT.
 #
 # Digital Post afventer altid kvittering uanset denne indstilling.
 WAIT_FOR_PHYSICAL_POST_RECEIPTS = False
