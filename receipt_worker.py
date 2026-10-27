@@ -295,7 +295,7 @@ def send_unmatched_receipt_mail(
         - alle returnerede felter fra DigitalPostReceipt
         - AMQP-metadata
         - den ydre XML-kuvert
-        - den base64-afkodede PKO_PostStatus
+        - den Base64-afkodede PKO_PostStatus
 
     Sikkerhed:
         KildesystemAkkreditiver fjernes fra XML'en før mailafsendelse.
@@ -305,9 +305,7 @@ def send_unmatched_receipt_mail(
 
     Fejl:
         Mail- og konfigurationsfejl fortsætter som exceptions.
-
-        Den kaldende worker skal i så fald requeue brokerbeskeden,
-        så vores egen umatchede kvittering ikke går tabt.
+        Den kaldende worker requeuer i så fald brokerbeskeden.
     """
     logger.warning(
         (
@@ -362,10 +360,8 @@ def send_unmatched_receipt_mail(
 
     validate_mail_configuration()
 
-    envelope_xml, payload_xml = (
-        _prepare_xml_for_mail(
-            raw_xml
-        )
+    envelope_xml, payload_xml = _prepare_xml_for_mail(
+        raw_xml
     )
 
     mail_body = (
@@ -374,8 +370,7 @@ def send_unmatched_receipt_mail(
         "Mailen indeholder alle fortolkede felter samt den "
         "maskerede XML-kuvert og den afkodede PKO_PostStatus. "
         "Oplysningerne kan bruges til at undersøge, hvordan "
-        "fysiske postkvitteringer skal matches.\n\n"
-
+        "kvitteringen skal matches.\n\n"
         "STATUS\n"
         "======\n"
         "Status: "
@@ -396,7 +391,6 @@ def send_unmatched_receipt_mail(
         f"{_format_mail_value(getattr(receipt, 'status_message', None))}\n"
         "Fejlkode: "
         f"{_format_mail_value(getattr(receipt, 'error_code', None))}\n\n"
-
         "IDENTIFIKATORER\n"
         "===============\n"
         "Relateret objekt-ID: "
@@ -415,7 +409,6 @@ def send_unmatched_receipt_mail(
         f"{_format_mail_value(getattr(receipt, 'broker_message_id', None))}\n"
         "Subscription expression ID: "
         f"{_format_mail_value(getattr(receipt, 'subscription_expression_id', None))}\n\n"
-
         "AMQP-METADATA\n"
         "=============\n"
         "Routing key: "
@@ -424,40 +417,38 @@ def send_unmatched_receipt_mail(
         f"{_format_mail_value(metadata.get('redelivered'))}\n"
         "Delivery tag: "
         f"{_format_mail_value(metadata.get('delivery_tag'))}\n\n"
-
         "YDRE BESKEDFORDELER-KUVERT\n"
         "==========================\n"
         f"{envelope_xml}\n\n"
-
         "AFKODET PKO_POSTSTATUS\n"
         "======================\n"
         f"{payload_xml}\n"
     )
 
+    # q-outlook-api modtager det enkle mailformat.
+    # Biblioteket bygger selv Microsoft Graph-payloaden.
     mail = {
-        "message": {
-            "subject": (
-                "Digital Post: Umatchet kvittering "
-                "fra vores system"
-            ),
-            "body": {
-                "contentType": "Text",
-                "content": mail_body,
-            },
-            "toRecipients": [
-                {
-                    "emailAddress": {
-                        "address": MAIL_RECIPIENT,
-                    }
-                }
-            ],
-        },
-        "saveToSentItems": True,
+        "subject": (
+            "Digital Post: Umatchet kvittering "
+            "fra vores system"
+        ),
+        "body": mail_body,
+        "content_type": "Text",
+        "to": [MAIL_RECIPIENT],
+        "cc": [],
+        "bcc": [],
+        "attachments": [],
+        "save_to_sent_items": True,
     }
 
     send_mail(
         MAIL_SENDER,
         mail,
+    )
+
+    logger.info(
+        "Mail om umatchet kvittering blev sendt til %s.",
+        MAIL_RECIPIENT,
     )
 
 

@@ -102,6 +102,11 @@ def _validate_box(box: dict[str, Any]) -> None:
     Fejl:
         PermanentItemError ved manglende eller ugyldige kødata.
     """
+    if not isinstance(box, dict):
+        raise PermanentItemError(
+            "Itemets box skal være en dictionary."
+        )
+
     required_fields = (
         "forsendelses_id",
         "recipient",
@@ -123,6 +128,9 @@ def _validate_box(box: dict[str, Any]) -> None:
             + ", ".join(missing_fields)
         )
 
+    # --------------------------------------------------------
+    # MODTAGER
+    # --------------------------------------------------------
     recipient = box["recipient"]
 
     if not isinstance(recipient, dict):
@@ -130,16 +138,84 @@ def _validate_box(box: dict[str, Any]) -> None:
             "box['recipient'] skal være en dictionary."
         )
 
-    if not recipient.get("id"):
+    recipient_id = recipient.get("id")
+    recipient_id_type = recipient.get("id_type")
+
+    if not isinstance(recipient_id, str) or not recipient_id.strip():
         raise PermanentItemError(
-            "box['recipient']['id'] mangler."
+            "box['recipient']['id'] mangler eller er ugyldigt."
         )
 
-    if recipient.get("id_type") not in {"CPR", "CVR"}:
+    if recipient_id_type not in {"CPR", "CVR"}:
         raise PermanentItemError(
             "box['recipient']['id_type'] skal være CPR eller CVR."
         )
 
+    if (
+        recipient_id_type == "CPR"
+        and (
+            len(recipient_id) != 10
+            or not recipient_id.isdigit()
+        )
+    ):
+        raise PermanentItemError(
+            "CPR-modtagerens id skal indeholde præcis 10 cifre."
+        )
+
+    if (
+        recipient_id_type == "CVR"
+        and (
+            len(recipient_id) != 8
+            or not recipient_id.isdigit()
+        )
+    ):
+        raise PermanentItemError(
+            "CVR-modtagerens id skal indeholde præcis 8 cifre."
+        )
+
+    # --------------------------------------------------------
+    # P-NUMMER
+    # --------------------------------------------------------
+    p_number = recipient.get("p_number")
+    production_unit_name = recipient.get(
+        "production_unit_name"
+    )
+
+    if p_number is not None:
+        if recipient_id_type != "CVR":
+            raise PermanentItemError(
+                "recipient.p_number må kun bruges sammen med CVR."
+            )
+
+        if (
+            not isinstance(p_number, str)
+            or len(p_number) != 10
+            or not p_number.isdigit()
+        ):
+            raise PermanentItemError(
+                "recipient.p_number skal indeholde "
+                "præcis 10 cifre."
+            )
+
+    if production_unit_name is not None:
+        if (
+            not isinstance(production_unit_name, str)
+            or not production_unit_name.strip()
+        ):
+            raise PermanentItemError(
+                "recipient.production_unit_name skal være "
+                "udfyldt tekst eller None."
+            )
+
+        if p_number is None:
+            raise PermanentItemError(
+                "recipient.production_unit_name kræver "
+                "recipient.p_number."
+            )
+
+    # --------------------------------------------------------
+    # LEVERINGSMETODE
+    # --------------------------------------------------------
     if box["delivery_method"] not in {
         "ONLY_DIGITAL_POST",
         "DIGITAL_OR_PHYSICAL_POST",
@@ -149,22 +225,14 @@ def _validate_box(box: dict[str, Any]) -> None:
             f"{box['delivery_method']!r}."
         )
 
+    # --------------------------------------------------------
+    # DOKUMENTER
+    # --------------------------------------------------------
     documents = box["documents"]
 
     if not isinstance(documents, list) or not documents:
         raise PermanentItemError(
             "box['documents'] skal være en ikke-tom liste."
-        )
-
-    main_documents = [
-        document
-        for document in documents
-        if document.get("role") == "MAIN"
-    ]
-
-    if len(main_documents) != 1:
-        raise PermanentItemError(
-            "Itemet skal indeholde præcis ét MAIN-dokument."
         )
 
     for document in documents:
@@ -193,6 +261,20 @@ def _validate_box(box: dict[str, Any]) -> None:
                 "Dokumentets role skal være MAIN eller ATTACHMENT."
             )
 
+    main_documents = [
+        document
+        for document in documents
+        if document["role"] == "MAIN"
+    ]
+
+    if len(main_documents) != 1:
+        raise PermanentItemError(
+            "Itemet skal indeholde præcis ét MAIN-dokument."
+        )
+
+    # --------------------------------------------------------
+    # FYSISK ADRESSE
+    # --------------------------------------------------------
     if (
         box["delivery_method"]
         == "DIGITAL_OR_PHYSICAL_POST"
@@ -201,6 +283,7 @@ def _validate_box(box: dict[str, Any]) -> None:
         raise PermanentItemError(
             "DIGITAL_OR_PHYSICAL_POST kræver en adresse."
         )
+
 
 
 def _save_item(item: Any) -> None:
@@ -368,18 +451,29 @@ async def _submit_digital_post(
     main_document: PostDocument,
     attachments: list[PostDocument],
 ) -> Any:
-    """Send Digital Post og returnér DigitalPostSendResult."""
+    """
+    Send Digital Post og returnér DigitalPostSendResult.
+
+    CVR-nummeret bruges som modtagerens egentlige ID.
+    Et eventuelt P-nummer sendes som modtagerens
+    produktionsenhed.
+    """
     recipient = box["recipient"]
 
     return await asyncio.to_thread(
         send_digital_post,
         recipient_id=recipient["id"],
         recipient_id_type=recipient["id_type"],
+        p_number=recipient.get("p_number"),
+        production_unit_name=(
+            recipient.get("production_unit_name")
+        ),
         subject=box["subject"],
         main_document=main_document,
         attachments=attachments,
-        # Registreringsvalget er allerede udført af q-digitalpost eller
-        # _choose_delivery_channel(). Undgå derfor et dobbelt opslag.
+        # Registreringsvalget er allerede udført af
+        # q-digitalpost eller _choose_delivery_channel().
+        # Derfor foretages der ikke endnu et opslag.
         check_registration=False,
     )
 
